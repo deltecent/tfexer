@@ -1,0 +1,1992 @@
+              	; --------------------------------------
+              	; zasm: assemble "tfexer.asm"
+              	; opts: --asm8080
+              	; date: 2020-04-06 09:27:14
+              	; --------------------------------------
+
+
+              	; TFEXER.ASM
+              	;
+              	; THIS PROGRAM IS USED TO EXERCISE FLOPPY DRIVES CONNECTED TO A
+              	; TARBELL 1011 SSSD FLOPPY DISK CONTROLLER.
+              	;
+              	; THIS SOFTWARE IS BASED ON AFEXER BY MIKE DOUGLAS.
+              	;
+              	; TFEXER SUPPORTS THE FOLLOWING COMMANDS:
+              	;
+              	;   D [x]    Select drive x, If x omitted, current drive # is displayed.
+              	;   C	     Compare track number read from disk with expected track
+              	;	     number. If expected track number is undefined, it is
+              	;	     set to the track number read from disk.
+              	;   F x      Format track x.
+              	;   G        Display FD1771 registers
+              	;   R x      Read sector x
+              	;   S x [y]  Step to track x. If optional track y is specified, then the 
+              	;	     head is stepped between x and y on each subsequent press of 
+              	;            the space bar. Pressing Q exits the test. 
+              	;   W x hh   Write sector x with hex hh
+              	;
+              	; Immediate commands (action taken as soon as the key is pressed)
+              	;   T        Toggle head load
+              	;   I	     Step in one track
+              	;   O        Step out one track
+              	;   Z        Restore to track zero
+              	; 
+              	; Version    Author        Date        Description
+              	; 1.0        P. Linstruth  12/10/19    Initial Version
+              	;
+              	
+              	; Tarbell SSSD Disk Drive Controller Equates
+              	
+00F8:         	drvBase	equ	0f8h		;drive base IO port
+00F8:         	drvStat	equ	drvBase+0	;drive status register (in)
+00F8:         	drvCmd	equ	drvBase+0	;drive command register (out)
+00F9:         	drvTrk	equ	drvBase+1	;drive track register (in/out)
+00FA:         	drvSec	equ     drvBase+2	;drive sector register (in/out)
+00FB:         	drvData	equ	drvBase+3	;drive data register (in/out)
+00FC:         	drvWait	equ	drvBase+4	;drive wait register (in)
+00FC:         	drvSel	equ	drvBase+4	;drive select register (out)
+              	
+0001:         	busyMsk	equ	001h		;mask to get busy bit alone
+0002:         	indxMsk	equ	002h		;mask to get index bit alone
+0002:         	drqMsk	equ	002h		;mask to get DRQ alone
+0004:         	trk0Msk	equ	004h		;mask to get TRACK0 bit alone
+0004:         	lostMsk	equ	004h		;mask to get lost data bit alone
+0008:         	crcMsk	equ	008h		;mask to get CRC error bit alone
+0010:         	seekMsk	equ	010h		;mask to get seek error bit alone
+0010:         	notfMsk	equ	010h		;mask to get not found bit alone
+0020:         	headMsk	equ	020h		;mask to get head load bit alone
+0020:         	wrtfMsk	equ	020h		;mask to get write fault bit alone
+0040:         	wrtpMsk	equ	040h		;mask to get write protect bit alone
+0080:         	nrdyMsk	equ	080h		;mask to get not ready bit alone
+00FC:         	errMsk	equ	0fch		;mask to test for errors
+              	
+0000:         	dcRest	equ     000h            ;drive command - restore
+0010:         	dcSeek	equ     010h            ;drive command - seek
+0020:         	dcStep	equ     020h            ;drive command - step
+0040:         	dcStepI	equ     040h            ;drive command - step in
+0060:         	dcStepO	equ     060h            ;drive command - step out
+008C:         	dcRead	equ     08ch            ;drive command - read sector
+00AC:         	dcWrite	equ     0ach            ;drive command - write sector
+00E4:         	dcRdTr	equ     0e4h            ;drive command - read track
+00F4:         	dcWrtTr	equ     0f4h            ;drive command - write track
+00C4:         	dcReadA	equ     0c4h            ;drive command - read address
+00D0:         	dcIntr	equ     0d0h            ;drive command - force interrupt
+              	
+0008:         	fHeadLd	equ	008h		;flag - head load
+0004:         	fVerify	equ	004h		;flag - verify
+0010:         	fUpdate	equ	010h		;flag - update
+0010:         	fMult	equ	010h		;flag - multiple record
+0008:         	fLength	equ	008h		;flag - block length
+0008:         	fImmInt	equ	008h		;flag - immediate interrupt
+0002:         	f10ms	equ	002		;flag - 10ms step rate
+              	
+00C0:         	dSelect	equ	0c0h		;select drive 0
+              	
+              	; Disk subsystem parameters
+              	
+0080:         	sectLen	equ     128             ;length of Tarbell sector
+001A:         	numSPT	equ     26              ;sectors/track
+004D:         	maxTrk	equ     77              ;max track number of tracks
+0004:         	numDrvs equ     4               ;number of drives on a controller
+              	
+              	; 88-2SIO Channel A Serial Interface Equates
+              	
+0010:         	sioACtl equ     010h            ;port A on 88-2SIO board
+0011:         	sioADat equ     011h
+0002:         	sioTdre equ     002h            ;mask to test for xmit ready
+0001:         	sioRdrf equ     001h            ;mask to test for rcv read
+              	
+              	;  Misc Equates
+              	
+0010:         	cmdLen  equ     16              ;length of command buffer
+000D:         	cr      equ     13              ;ascii carriage return
+000A:         	lf      equ     10              ;ascii line feed
+0008:         	bs      equ     8               ;ascii backspace
+00FF:         	notSet  equ     0ffh            ;track or drive number not set
+0000:         	wBoot   equ     0000h           ;CP/M warm boot vector
+00C3:         	jmpInst equ     0c3h            ;8080 jump instruction
+              	
+              	
+0100:         		org	0100h		;start at 0100h
+              	
+              	;------------------------------------------------------------------------------
+              	; Initialize stack pointer, UART and data structures
+              	;------------------------------------------------------------------------------
+0100: 31EA0D  		lxi     sp,stack        ;init stack pointer
+              	
+0103: CDE006  		call    chkCpm          ;determine if running under CP/M
+              	
+0106: CD1E07  		call    initSio         ;init 2SIO if needed
+              	
+0109: AF      		xra     a               ;default to drive zero
+010A: 321C0D  		sta     newDrv          ;
+010D: 321D0D  		sta     curDrv          ;...for first drive selection
+              	
+0110: 212C07  	       	lxi     h,mVer          ;display version message
+0113: CDC406  	       	call    dispMsg
+0116: 215607  	       	lxi     h,mAuthor	;display author message
+0119: CDC406  	       	call    dispMsg
+              	
+              	;------------------------------------------------------------------------------
+              	; cmdLoop - main command loop
+              	;------------------------------------------------------------------------------
+011C: 217407  	cmdLoop	lxi	h,mPrompt	;display the prompt
+011F: CDC406  		call	dispMsg
+0122: 211C01  		lxi	h,cmdLoop	;create return address for commands
+0125: E5      		push	h
+0126: CD2B05  		call	readCmd		;get the command
+0129: 21F80C  		lxi	h,cmdBuf	;assume 1st character is the command
+012C: 7E      		mov	a,m
+012D: 23      		inx	h		;point hl to params past command character
+012E: FE44    		cpi	'D'		;select drive N
+0130: CA9D01  		jz	cmdDrvN
+0133: FE5A    		cpi	'Z'		;restore to track zero
+0135: CADA01  		jz	cmdTrk0
+0138: FE43    		cpi	'C'		;compare track on disk to expected track
+013A: CA5F03  		jz	cmdCmp
+013D: FE53    		cpi	'S'		;step to track n
+013F: CA1802  		jz	cmdTrkN
+0142: FE4F    		cpi	'O'		;immedate step out-in
+0144: CAE401  		jz	cmdOut
+0147: FE54    		cpi	'T'		;immediate step in-out
+0149: CA1603  		jz	cmdTog
+014C: FE49    		cpi	'I'		;immediate step in-out
+014E: CAFE01  		jz	cmdIn
+0151: FE46    		cpi	'F'		;format track
+0153: CA1304  		jz	cmdFmtN
+0156: FE47    		cpi	'G'		;display registers
+0158: CA7601  		jz	cmdRegs
+015B: FE52    		cpi	'R'		;read sector
+015D: CA7102  		jz	cmdRead
+0160: FE57    		cpi	'W'		;write sector
+0162: CAAF02  		jz	cmdWrt
+0165: FE58    		cpi	'X'		;exit to CP/M
+0167: CC0907  		cz	exitCpm
+016A: 217B07  		lxi	h,mHelp		;invalid command entered, display help
+016D: CDC406  		call	dispMsg	
+0170: 213809  		lxi	h,mHelp2
+0173: C3C406  		jmp	dispMsg		;display and return to cmdLoop
+              	
+              	;------------------------------------------------------------------------------
+              	; cmdRegs - display registers
+              	;------------------------------------------------------------------------------
+0176: 210F0B  	cmdRegs	lxi	h,mTrkReg	;track register
+0179: CDC406  		call	dispMsg
+017C: DBF9    		in	drvTrk
+017E: CDA006  		call	dispHex
+0181: CDCF06  		call	dispEOL
+              	
+0184: 21210B  		lxi	h,mSecReg	;sector register
+0187: CDC406  		call	dispMsg
+018A: DBFA    		in	drvSec		
+018C: CDA006  		call	dispHex
+018F: CDCF06  		call	dispEOL
+              	
+0192: 21330B  		lxi	h,mStaReg	;status register
+0195: CDC406  		call	dispMsg
+0198: DBF8    		in	drvStat
+019A: C3A006  		jmp	dispHex		;return
+              	
+              	;------------------------------------------------------------------------------
+              	; cmdDrvN - Select drive N
+              	;------------------------------------------------------------------------------
+019D: CDBD05  	cmdDrvN	call	getTokn		;get the drive number
+01A0: CDE605  		call	dec2bin		;convert ascii token to binary in A
+01A3: C2C801  		jnz	noDrv		;no drive specified
+01A6: FE04    		cpi	numDrvs		;valid drive number?
+01A8: D2D401  		jnc	badDrv
+01AB: 321C0D  		sta	newDrv		;newDrv = the new drive to select	
+01AE: CDBD03  		call	selDrv		;select the drive in newDrv
+              	
+              	; New drive selected. Display the selected drive
+              	
+01B1: 21B90A  		lxi	h,mDrive	;display 'Selected Drive n'
+01B4: CDC406  		call	dispMsg
+01B7: 3A1D0D  		lda	curDrv		;display selected drive number
+01BA: CD5D06  		call	dispDec
+              	
+              	; Print current track
+              	
+01BD: 21FB0A  		lxi	h,mDrvTrk	;display the track the drive is on
+01C0: CDC406  		call	dispMsg
+01C3: DBF9    		in	drvTrk		;get the current track to display
+01C5: C35D06  		jmp	dispDec		;display and return to cmdLoop
+              	
+              	; noTrack - current track is undefined. Display "not set"
+              	;
+              	;noTrack	lxi	h,mNoTrk
+              	;	jmp	dispMsg		;display and return to cmdLoop
+              	
+              	; noDrv - no drive specified, or drive selection failed. Display 
+              	;    the current drive number
+              	
+01C8: 21C90A  	noDrv	lxi	h,mCurDrv	;display current drive prompt
+01CB: CDC406  		call	dispMsg
+01CE: 3A1D0D  		lda	curDrv		;display current drive number
+01D1: C35D06  		jmp	dispDec		;display and return to cmdLoop
+              	
+              	; noSet - curDrv has not been set yet. Display "not set" as current drive number
+              	;
+              	;noSet	lxi	h,mNotSet
+              	;	jmp	dispMsg		;display and return to cmdLoop
+              	
+              	; badDrv - bad drive number specified. Display message.
+              		
+01D4: 219F0B  	badDrv	lxi	h,mBadDrv	;bad drive number specified	
+01D7: C3C406  		jmp	dispMsg		;display and return to cmdLoop
+              	
+              	;------------------------------------------------------------------------------
+              	; cmdTrk0 - Seek to track zero
+              	;------------------------------------------------------------------------------
+01DA: CDD503  	cmdTrk0	call	seek0
+01DD: C8      		rz			;exit if seek0 failed
+01DE: 21050A  		lxi	h,mTrack0	;display track 0 message
+01E1: C3C406  		jmp	dispMsg		;display and return to cmdLoop
+              	
+              	;------------------------------------------------------------------------------
+              	; cmdOut - Step out one track. Step is issued no matter what. 
+              	;    If curTrk valid, update it.
+              	;------------------------------------------------------------------------------
+01E4: DBF8    	cmdOut	in	drvStat		;already at track 0?
+01E6: E604    		ani	trk0Msk
+01E8: C20704  		jnz	atDisp		;display at track message
+              	
+01EB: 3AA70D  		lda	headLd		;head load flag
+01EE: F660    		ori	dcStepO		;step out command
+01F0: F610    		ori	fUpdate		;update track register
+01F2: F602    		ori	f10ms		;10ms step rate
+01F4: D3F8    		out	drvCmd
+01F6: DBFC    		in	drvWait		;wait for INTRQ
+              	
+01F8: DBF9    		in	drvTrk		;get track from drive
+01FA: 4F      		mov	c,a		;save track in c
+01FB: C3FC03  		jmp	movExit		;save and display it
+              	
+              	;------------------------------------------------------------------------------
+              	; cmdIn - Step in one track. Step is issued no matter what.
+              	;     If curTrk valid, update it.
+              	;------------------------------------------------------------------------------
+01FE: DBF9    	cmdIn	in	drvTrk		;get current track from drive
+0200: FE4C    		cpi	maxTrk-1	;already stepped in max
+0202: CA0704  		jz	atDisp		;display at track message
+              	
+0205: 3AA70D  		lda	headLd		;head load flag
+0208: F640    		ori	dcStepI		;step in command
+020A: F610    		ori	fUpdate		;update track register
+020C: F602    		ori	f10ms		;10ms step rate
+020E: D3F8    		out	drvCmd
+0210: DBFC    		in	drvWait		;wait for INTRQ
+              	
+0212: DBF9    		in	drvTrk		;read track register
+0214: 4F      		mov	c,a		;c=current track number
+0215: C3FC03  		jmp	movExit		;save and display it
+              	
+              	;------------------------------------------------------------------------------
+              	; cmdTrkN - Seek to track N or toggle seek between two tracks each time
+              	;	the space bar is pressed. Any other key exits.
+              	;------------------------------------------------------------------------------
+0218: CDBD05  	cmdTrkN	call	getTokn		;get track token		
+021B: CDE605  		call	dec2bin		;convert ascii token to binary in a and b
+021E: C25902  		jnz	badTrk		;1st track specification invalid
+0221: 32180D  		sta	track1		;save 1st track number value
+0224: 3E4C    		mvi	a,maxTrk-1
+0226: B8      		cmp	b		;reasonable track number?
+0227: DA5902  		jc	badTrk		;n: error
+              	
+022A: CDBD05  		call	getTokn		;get 2nd track number (if any)
+022D: CDE605  		call	dec2bin
+0230: C25302  		jnz	noTrk2		;2nd track not specified
+0233: 32190D  		sta	track2		;save 2nd track number
+0236: 3E4C    		mvi	a,maxTrk-1
+0238: B8      		cmp	b		;reasonable track number?
+0239: DA5902  		jc	badTrk		;n: error
+              	
+              	; Two track numbers provided. Loop here toggling back and forth when
+              	;    space bar pressed. Exit to command loop when any other key pressed.
+              	
+023C: 3A180D  	trkLoop	lda	track1		;move to 1st track number
+023F: CDEF03  		call	movTrk
+0242: CD5F02  		call	tglTrk		;prompt to toggle tracks
+0245: C0      		rnz			;return to cmdLoop
+0246: 3A190D  		lda	track2
+0249: CDEF03  		call	movTrk
+024C: CD5F02  		call	tglTrk
+024F: CA3C02  		jz	trkLoop
+0252: C9      		ret			;return to cmdLoop
+              		
+              	; One track number provided. Seek to that track then exit
+              	
+0253: 3A180D  	noTrk2	lda	track1		;move to 1st track number
+0256: C3EF03  		jmp	movTrk		;move and return to cmdLoop
+              	
+              	; No valid track number provided.
+              	
+0259: 21B40B  	badTrk	lxi	h,mBadTrk	;bad track message
+025C: C3C406  		jmp	dispMsg		;display and return to cmdLoop
+              	
+              	;------------------------------------------------------------------------------
+              	; tglTrk - put up message to toggle between track 1 and track 2 and then
+              	;    wait for the user's response. Zero status true to continue. Zero
+              	;    status false to exit. 
+              	;------------------------------------------------------------------------------
+025F: 214D0B  	tglTrk	lxi	h,mSpace	;press space bar message
+0262: CDC406  		call	dispMsg
+0265: CD9405  		call	rcvChar
+0268: FE20    		cpi	' '		;space toggles tracks
+026A: C0      		rnz			;no space - exit with Z clear
+026B: 21ED0C  		lxi	h,mCrLf
+026E: C3C406  		jmp	dispMsg		;returns with Z set
+              	
+              	;------------------------------------------------------------------------------
+              	; cmdRead - read and display sector
+              	;------------------------------------------------------------------------------
+0271: CDBD05  	cmdRead	call	getTokn		;get track token		
+0274: CDE605  		call	dec2bin		;convert ascii token to binary in a and b
+0277: C2FB02  		jnz	badSect		;1st track specification invalid
+027A: 3E1A    		mvi	a,numSPT
+027C: B8      		cmp	b		;reasonable track number?
+027D: DAFB02  		jc	badSect		;> sectors error
+0280: AF      		xra	a		;sector 0 error
+0281: B8      		cmp	b
+0282: CAFB02  		jz	badSect	
+              	
+0285: 211F0D  		lxi	h,sectBuf
+              	
+0288: CDA703  		call	chkRdy		;is drive ready?
+028B: C2AC03  		jnz	notRdy		;no - not ready message and return
+              	
+028E: 78      		mov	a,b		;send sector to drive
+028F: D3FA    		out	drvSec
+              	
+0291: 3E8C    		mvi	a,dcRead	;send read command
+0293: D3F8    		out	drvCmd
+              	
+0295: DBFC    	rdLoop	in	drvWait		;wait for INTRQ/DRQ
+0297: B7      		ora	a
+0298: F2A202  		jp	rdDone		;INTRQ is done
+              	
+029B: DBFB    		in	drvData		;get byte
+029D: 77      		mov	m,a		;store byte
+029E: 23      		inx	h
+029F: C39502  		jmp	rdLoop		;get next byte
+              	
+02A2: DBF8    	rdDone	in	drvStat		;get status
+02A4: B7      		ora	a		;
+02A5: CA7306  		jz	dispSec		;no error - display sector
+              	
+02A8: 5F      	rdErr	mov	e,a		;save error
+02A9: 21700C  		lxi	h,mRdErr	;read error
+02AC: C30703  		jmp	dispErr		;display error - return
+              	
+              	;------------------------------------------------------------------------------
+              	; cmdWrt - write sector
+              	;------------------------------------------------------------------------------
+02AF: CDBD05  	cmdWrt	call	getTokn		;get track token		
+02B2: CDE605  		call	dec2bin		;convert ascii token to binary in a and b
+02B5: C2FB02  		jnz	badSect		;1st track specification invalid
+02B8: 3E1A    		mvi	a,numSPT
+02BA: B8      		cmp	b		;reasonable track number?
+02BB: DAFB02  		jc	badSect		;> sectors error
+02BE: AF      		xra	a		;sector 0 error
+02BF: B8      		cmp	b
+02C0: CAFB02  		jz	badSect	
+02C3: 78      		mov	a,b
+02C4: 321A0D  		sta	wrSec		;save sector number
+              	
+02C7: CDBD05  		call	getTokn		;get value to write
+02CA: CD0D06  		call	hex2bin
+02CD: C20103  		jnz	noVal		;write value not specified
+02D0: 321B0D  		sta	wrVal		;save write value
+              	
+02D3: CDA703  		call	chkRdy		;is drive ready?
+02D6: C2AC03  		jnz	notRdy		;no - not ready message and return
+              	
+02D9: 3A1A0D  		lda	wrSec		;send sector to drive
+02DC: D3FA    		out	drvSec
+              	
+02DE: 3EAC    		mvi	a,dcWrite	;send write command
+02E0: D3F8    		out	drvCmd
+              	
+02E2: DBFC    	wrLoop	in	drvWait		;wait for INTRQ/DRQ
+02E4: B7      		ora	a
+02E5: F2F002  		jp	wrDone		;INTRQ is done
+              	
+02E8: 3A1B0D  		lda	wrVal		;get write value
+02EB: D3FB    		out	drvData		;write byte
+02ED: C3E202  		jmp	wrLoop		;write next byte
+              	
+02F0: DBF8    	wrDone	in	drvStat		;get status
+02F2: B7      		ora	a		;
+02F3: C8      		rz			;no error - return
+              	
+02F4: 5F      		mov	e,a		;save error
+02F5: 217D0C  		lxi	h,mWrErr	;write error
+02F8: C30703  		jmp	dispErr		;display error - return
+              	
+              	; No valid sector number provided.
+              	
+02FB: 21C90B  	badSect	lxi	h,mBadSec	;bad track message
+02FE: C3C406  		jmp	dispMsg		;display and return to cmdLoop
+              	
+0301: 21FD0B  	noVal	lxi	h,mBadVal	;bad value message
+0304: C3C406  		jmp	dispMsg		;display and return to cmdLoop
+              	
+              	;------------------------------------------------------------------------------
+              	; dispErr - display error message in h:l and value in e
+              	;------------------------------------------------------------------------------
+0307: CDC406  	dispErr call	dispMsg
+030A: 7B      		mov	a,e
+030B: CDA006  		call	dispHex		;display code and return
+030E: 21ED0C  		lxi	h,mCrLf
+0311: CDC406  		call	dispMsg
+0314: AF      		xra	a		;set zero flag
+0315: C9      		ret
+              	
+              	;------------------------------------------------------------------------------
+              	; cmdTog - Toggle head load
+              	;------------------------------------------------------------------------------
+0316: CDA703  	cmdTog	call	chkRdy		;is drive ready?
+0319: CA2303  		jz	togHld		;yes - toggle head load
+              	
+031C: AF      		xra	a		;drive not ready
+031D: 32A70D  		sta	headLd		;clear head load flag
+              	
+0320: C3AC03  		jmp	notRdy		;no ready message - return
+              	
+0323: 3AA70D  	togHld	lda	headLd		;get current head load flag
+0326: EE08    		xri	fHeadLd		;flip it
+0328: E608    		ani	fHeadLd		;isolate it
+032A: 32A70D  		sta	headLd		;save it
+032D: CA3603  		jz	unldHd
+              	
+0330: 21EB09  		lxi	h,mHeadL
+0333: C3C406  		jmp	dispMsg
+              	
+0336: 21F709  	unldHd	lxi	h,mHeadU
+0339: C3C406  		jmp	dispMsg
+              	
+              	
+              	;------------------------------------------------------------------------------
+              	; seekCur - Seek to current track. Return status in A
+              	;------------------------------------------------------------------------------
+033C: DBF9    	seekCur	in	drvTrk		;get current track
+033E: D3FB    		out	drvData		;save in data register
+              	
+0340: 3AA70D  		lda	headLd		;get head load flag
+0343: F610    		ori	dcSeek		;seek command
+0345: D3F8    		out	drvCmd		;execute
+0347: DBFC    		in	drvWait		;wait for INTRQ
+              	
+0349: DBF8    		in	drvStat		;return status in a
+034B: C9      		ret
+              	
+              	;------------------------------------------------------------------------------
+              	; readTrk - Reads a track
+              	;------------------------------------------------------------------------------
+              	
+034C: CDA703  	readTrk	call	chkRdy		;is drive ready
+034F: C2AC03  		jnz	notRdy		;no - exit
+              	
+0352: 3EE4    		mvi	a,dcRdTr	;issue read track command
+0354: D3F8    		out	drvCmd
+              	
+0356: DBFC    	rtLoop	in	drvWait		;wait for DRQ or INTRQ
+0358: B7      		ora	a
+0359: F0      		rp			;INTRQ - done with track read
+              	
+035A: DBFB    		in	drvData		;read byte
+035C: C35603  		jmp	rtLoop		;get next byte
+              	
+              	;------------------------------------------------------------------------------
+              	; cmdCmp - Read and display the track number from disk along with the
+              	;    expected track number. If the expected track number is not valid
+              	;    and a valid track number was found on the disk, set curTrk and
+              	;    the trkTbl entry for this drive to the track number from disk.
+              	;------------------------------------------------------------------------------
+035F: CDA703  	cmdCmp	call	chkRdy
+0362: C2AC03  		jnz	notRdy
+              	
+0365: CD8203  		call	rdTrkId		;read track ID again
+0368: 47      		mov	b,a		;b=read track id
+              	
+              	; display the track number found on disk
+              	
+0369: 58      		mov	e,b		;e=track read from disk
+036A: 21590A  		lxi	h,mTrkId	;display track ID message
+036D: CDC406  		call	dispMsg
+0370: 7B      		mov	a,e		;a=track number read
+0371: CD5D06  		call	dispDec		;display it
+0374: C37703  		jmp	dispExp		;go display expected track
+              	
+              	; dispExp - display the expected track number
+              	
+0377: 21890A  	dispExp	lxi	h,mExpTrk	;display expected track number
+037A: CDC406  		call	dispMsg
+              	
+037D: DBF9    		in	drvTrk		;a=expected track
+037F: C35D06  		jmp	dispDec		;yes, display it and exit
+              	
+              	;------------------------------------------------------------------------------
+              	;  rdTrkId - Read track number from the next sector found. Returns
+              	;    track number in A if found. If sector hunt times out, an invalid
+              	;    sector number is returned in A.
+              	;    clobbers a,de,hl
+              	;------------------------------------------------------------------------------
+0382: CDA703  	rdTrkId	call	chkRdy		;drive must be ready
+0385: C2AC03  		jnz	notRdy		;
+              	
+0388: 219F0D  		lxi	h,addrBuf
+              	
+038B: 3EC4    		mvi	a,dcReadA	;read address
+038D: D3F8    		out	drvCmd
+              	
+038F: DBFC    	rdTData	in	drvWait		;wait for DRQ/INTRQ
+0391: B7      		ora	a
+0392: F29C03  		jp	rdTDone		;INTRQ = done
+              	
+0395: DBFB    		in	drvData		;read the track byte
+0397: 77      		mov	m,a		;save in address buffer
+0398: 23      		inx	h
+0399: C38F03  		jmp	rdTData
+              	
+039C: DBF8    	rdTDone	in	drvStat		;error?
+039E: E6FC    		ani	errMsk
+03A0: C2A802  		jnz	rdErr		;yes - display error
+              	
+03A3: 3A9F0D  		lda	addrBuf		;return first byte in a
+              	
+03A6: C9      		ret
+              	
+              	;-----------------------------------------------------------------------------
+              	; chkRdy - Check if drive is ready
+              	;   Not zero if drive not ready, otherwise zero
+              	;-----------------------------------------------------------------------------
+03A7: DBF8    	chkRdy	in	drvStat
+03A9: E680    		ani	nrdyMsk
+03AB: C9      		ret
+              	
+              	;-----------------------------------------------------------------------------
+              	; notRdy - display drive not ready message
+              	;-----------------------------------------------------------------------------
+03AC: 21DB0A  	notRdy	lxi	h,mNotRdy
+03AF: C3C406  		jmp	dispMsg
+              	
+              	;-----------------------------------------------------------------------------
+              	;  resDrv - reset the drive's controller. return status is A.
+              	;-----------------------------------------------------------------------------
+03B2: 3ED0    	resDrv	mvi	a,dcIntr	;force interrupt
+03B4: F608    		ori	fImmInt		;immediate interrupt
+03B6: D3F8    		out	drvCmd
+              	
+03B8: DBFC    		in	drvWait		;wait for DRQ/INTRQ
+              	
+03BA: DBF8    		in	drvStat		;a=drive status
+              	
+03BC: C9      		ret
+              	
+              	;-----------------------------------------------------------------------------
+              	;  selDrv - select the drive specified in newDrv and update track.
+              	;       clobbers a, c, de, hl
+              	;-----------------------------------------------------------------------------
+03BD: 3A1C0D  	selDrv	lda	newDrv		;drive number to select
+03C0: 211D0D  		lxi	h,curDrv	;point to currently selected drive number
+03C3: 77      		mov	m,a
+              	
+03C4: E603    		ani	003h		;drive number 0-3
+03C6: 2F      		cma			;tarbell's latch is inverted
+03C7: 87      		add	a		;shift bits 4 places
+03C8: 87      		add	a			
+03C9: 87      		add	a
+03CA: 87      		add	a
+03CB: F602    		ori	2		;set latch
+03CD: D3FC    		out	drvSel		;select new drive
+              	
+03CF: CDB203  		call	resDrv		;reset drive and get status
+              	
+03D2: C3D503  		jmp	seek0		;seek to track 0 - return
+              	
+              	;-----------------------------------------------------------------------------
+              	; seek0 - seek to track zero. Steps in 3 tracks before seeking back out
+              	;    to track zero in case the zero stop is incorrect. The max number of
+              	;    steps outward is the max number of tracks on the disk plus 16. These
+              	;    extra steps will cause an SA400 minidisk to find track 0 even if the
+              	;    actuator mechanism is out of its spiral groove.
+              	;-----------------------------------------------------------------------------
+03D5: 3AA70D  	seek0	lda	headLd		;head load flag
+03D8: F600    		ori	dcRest		;issue restore command
+03DA: F602    		ori	f10ms		;10ms step rate
+03DC: D3F8    		out	drvCmd
+03DE: DBFC    		in	drvWait
+              	
+03E0: CD2305  		call	waitBsy		;kill some time for zero flag
+              	
+03E3: DBF8    		in	drvStat		;get status register
+03E5: E604    		ani	004h		;check track 0 flag
+03E7: C0      		rnz			;no error - return
+              	
+03E8: 5F      	stErr	mov	e,a		;save error in e
+03E9: 218B0C  		lxi	h,mStErr	;step error
+03EC: C30703  		jmp	dispErr		;display error - return
+              	
+              	;------------------------------------------------------------------------------
+              	;  movTrk - moves to the track specified in A. Assumes A is valid.
+              	;     trashes a,c,de,hl
+              	;------------------------------------------------------------------------------	
+03EF: D3FB    	movTrk	out	drvData		;store A in track register
+              	
+03F1: 3AA70D  		lda	headLd		;head load flag
+03F4: F610    		ori	dcSeek		;issue SEEK
+03F6: F602    		ori	f10ms		;10ms step rate
+03F8: D3F8    		out	drvCmd		;
+03FA: DBFC    		in	drvWait		;wait for INTRQ
+              	
+              	; movExit - store the new track number in curTrk and in trkTbl for the
+              	;    current drive number, then display "moved to track" message
+              	; movDisp - display "moved to track" message
+              	
+03FC: 21190A  	movExit	lxi	h,mTrackN	;'Moved to track '
+03FF: CDC406  		call	dispMsg
+0402: DBF9    		in	drvTrk		;display track number from binary value
+0404: C35D06  		jmp	dispDec		;display and exit
+              	
+              	; atDisp - display "at track" message
+              	
+0407: 21470A  	atDisp	lxi	h,matTrkN	;'Already at track '
+040A: CDC406  		call	dispMsg
+040D: DBF9    		in	drvTrk		;display track number from binary value
+040F: C35D06  		jmp	dispDec		;display and exit
+              	
+              	;------------------------------------------------------------------------------
+              	;  saveTrk - Save the track number passed in C to curTrk and to the
+              	;    track table entry for the current drive.
+              	;    clobbers a,de,hl
+              	;------------------------------------------------------------------------------
+0412: C9      	saveTrk	ret
+              	
+              	;------------------------------------------------------------------------------
+              	; cmdFmtN - format a track
+              	;------------------------------------------------------------------------------
+0413: CDBD05  	cmdFmtN	call	getTokn		;get the drive number
+0416: CDE605  		call	dec2bin		;convert ascii token to binary in A
+0419: C25902  		jnz	badTrk		;no track specified
+041C: FE4D    		cpi	maxTrk		;valid track number?
+041E: D25902  		jnc	badTrk
+0421: CDEF03  		call	movTrk		;move to selected track
+              	
+0424: 1601    		mvi	d,1		;sector cnt to 0
+0426: 1E1A    		mvi	e,numSPT	;set max # sectors
+0428: 0628    		mvi	b,40		;gap 4 preindex 40 bytes of ff
+              	
+042A: 3EF4    		mvi	a,dcWrtTr	;load track write command
+042C: D3F8    		out	drvCmd		;issue track write
+              	
+              	; write preindex fill
+              	
+042E: DBFC    	preInd	in	drvWait		;wait for drq
+0430: B7      		ora	a		;set flags
+0431: F21C05  		jp	fmtFail		;jmp out if error
+              	
+0434: 3EFF    		mvi	a,0FFh		;load preindex fill
+0436: D3FB    		out	drvData		;write it on disk
+0438: 05      		dcr	b		;count = count - 1
+0439: C22E04  		jnz	preInd		;go back till b = 0
+              	
+043C: 0606    		mvi	b,6
+              	
+043E: DBFC    	preIn1	in	drvWait
+0440: B7      		ora	a
+0441: F21C05  		jp	fmtFail
+              	
+0444: AF      		xra	a
+0445: D3FB    		out	drvData
+0447: 05      		dcr	b
+0448: C23E04  		jnz	preIn1
+              	
+              	; write address mark on track
+              	
+044B: DBFC    		in	drvWait		;wait for drq
+044D: B7      		ora	a		;set flags
+044E: F21C05  		jp	fmtFail		;jmp out if error
+              	
+0451: 3EFC    		mvi	a,0FCh		;load address mark
+0453: D3FB    		out	drvData		;write it on disk
+              	
+              	; post index gap
+              	
+0455: 061A    	postGap	mvi	b,26		;set # of bytes
+              	
+0457: DBFC    	postId	in	drvWait		;wait for drq
+0459: B7      		ora	a		;set flags
+045A: F21C05  		jp	fmtFail		;jmp out if error
+              	
+045D: 3EFF    		mvi	a,0FFh		;load fill data
+045F: D3FB    		out	drvData		;write it on disk
+0461: 05      		dcr	b		;count = count - 1
+0462: C25704  		jnz	postId		;if not 0 go back
+              	
+              	; pre id section
+              	
+0465: 0606    		mvi	b,6		;get # of bytes
+              	
+0467: DBFC    	sector	in	drvWait		;wait for drq
+0469: B7      		ora	a		;set flags
+046A: F21C05  		jp	fmtFail		;jmp out if error
+              	
+046D: AF      		xra	a		;make a = 0
+046E: D3FB    		out	drvData		;write it on track
+0470: 05      		dcr	b		;count = count - 1
+0471: C26704  		jnz	sector		;jmp back if not done
+              	
+              	; write id address mark
+              	
+0474: DBFC    		in	drvWait		;wait for drq
+0476: B7      		ora	a		;set flags
+0477: F21C05  		jp	fmtFail		;if error jmp out
+              	
+047A: 3EFE    		mvi	a,0FEh		;get address mark
+047C: D3FB    		out	drvData		;write it on disk
+              	
+              	; write track number on disk
+              	
+047E: DBFC    		in	drvWait		;wait for drq
+0480: B7      		ora	a		;set flags
+0481: F21C05  		jp	fmtFail		;jmp out if error
+              	
+0484: DBF9    		in	drvTrk		;get track number
+0486: D3FB    		out	drvData		;write it on disk
+              	
+              	; write one byte of 00
+              	
+0488: DBFC    		in	drvWait		;wait for drq
+048A: B7      		ora	a		;set flags
+048B: F21C05  		jp	fmtFail		;jmp out if error
+              	
+048E: AF      		xra	a		;set a to 0
+048F: D3FB    		out	drvData		;write it on disk
+              	
+              	; write sector # on disk
+              	
+0491: DBFC    		in	drvWait		;wait for drq
+0493: B7      		ora	a		;set flags
+0494: F21C05  		jp	fmtFail		;jmp out if error
+              	
+0497: 7A      		mov	a,d		;get sector #
+0498: D3FB    		out	drvData		;write it on disk
+              	
+              	; one more byte 0
+              	
+049A: DBFC    		in	drvWait		;wait for drq
+049C: B7      		ora	a		;set flags
+049D: F21C05  		jp	fmtFail		;jmp out if error
+              	
+04A0: AF      		xra	a		;set a to 00
+04A1: D3FB    		out	drvData		;write it on disk
+04A3: 14      		inr	d		;bump sect. #
+              	
+              	; write 2 crc's on this sector
+              	
+04A4: DBFC    		in	drvWait		;wait for drq
+04A6: B7      		ora	a		;set flags
+04A7: F21C05  		jp	fmtFail		;jmp out if error
+              	
+04AA: 3EF7    		mvi	a,0F7h		;get crc pattern
+04AC: D3FB    		out	drvData		;write it on disk
+              	
+              	; pre data 11 bytes FF, 6 bytes 00
+              	
+04AE: 060B    		mvi	b,11		;set count
+04B0: DBFC    	preDat	in	drvWait		;wait for drq
+04B2: B7      		ora	a		;set flags
+04B3: F21C05  		jp	fmtFail		;jmp out if error
+              	
+04B6: 3EFF    		mvi	a,0FFh		;set a to FF
+04B8: D3FB    		out	drvData		;write it on disk
+04BA: 05      		dcr	b		;reduce count by 1
+04BB: C2B004  		jnz	preDat		;go back if not done
+              	
+04BE: 0606    		mvi	b,6
+              	
+04C0: DBFC    	preDa1	in	drvWait
+04C2: B7      		ora	a
+04C3: F21C05  		jp	fmtFail
+              	
+04C6: AF      		xra	a 
+04C7: D3FB    		out	drvData
+04C9: 05      		dcr	b
+04CA: C2C004  		jnz	preDa1
+              	
+              	; data address mark
+              	
+04CD: DBFC    		in	drvWait		;wait for drq
+04CF: B7      		ora	a		;set flags
+04D0: F21C05  		jp	fmtFail		;jmp out if error
+              	
+04D3: 3EFB    		mvi	a,0FBh		;get data address mark
+04D5: D3FB    		out	drvData		;write it on disk
+              	
+              	; fill data field with E5
+              	
+04D7: 0680    		mvi	b,128		;set field length
+04D9: DBFC    	dFill	in	drvWait		;wait for drq
+04DB: B7      		ora	a		;you know what
+04DC: F21C05  		jp	fmtFail		;happens here by now
+              	
+04DF: 3EE5    		mvi	a,0E5h		;get fill byte
+04E1: D3FB    		out	drvData		;write it on disk
+04E3: 05      		dcr	b		;drop 1 from count
+04E4: C2D904  		jnz	dFill		;do till 00
+              	
+              	; write CRC's
+              	
+04E7: DBFC    		in	drvWait		;wait till drq
+04E9: B7      		ora	a		;set flags
+04EA: F21C05  		jp	fmtFail		;jmp out if error
+              	
+04ED: 3EF7    		mvi	a,0F7h		;get crc byte
+04EF: D3FB    		out	drvData		;write it on disk
+              	
+              	; end of sector fill
+              	
+04F1: 1D      		dcr	e		;reduce sector count
+04F2: CA0205  		jz	endTrk		;if 0 do end of track rtn
+              	
+04F5: DBFC    	datGap	in	drvWait		;wait for drq
+04F7: B7      		ora	a		;set flags	
+04F8: F21C05  		jp	fmtFail		;jmp out if error
+              	
+04FB: 3EFF    		mvi	a,0FFh		;get fill character
+04FD: D3FB    		out	drvData		;write it on disk
+04FF: C35504  		jmp	postGap		;go back for more
+              	
+              	; endTrk - fill with FFh until command ends at index hole
+              	
+0502: DBFC    	endTrk	in	drvWait		;wait for drq or intrq
+0504: B7      		ora	a		;set flags
+0505: F20F05  		jp	done		;jmp out if error
+              	
+0508: 3EFF    		mvi	a,0FFh		;load a with FFh
+050A: D3FB    		out	drvData		;write it on disk
+050C: C30205  		jmp	endTrk		;do until intrq
+              	
+              	; done - check for error from the write track command. Wait for trim
+              	;     erase delay in case the drive has tunnel erase heads, then
+              	;     move to the next track.
+              	
+050F: DBF8    	done	in	drvStat		;read status of write track command
+0511: E6FF    		ani	0ffh		;test for any flag
+0513: C21C05  		jnz	fmtFail		;if err go to err print rtn
+              	
+0516: 21290A  		lxi	h,mFmtDon	;format complete message
+0519: C3C406  		jmp	dispMsg		;display message and return
+              	
+051C: 5F      	fmtFail mov	e,a		;save error in e
+051D: 21390A  		lxi	h,mFmtErr	;format fail message
+0520: C30703  		jmp	dispErr		;display error - return
+              	
+              	
+              	;------------------------------------------------------------------------------
+              	; waitBsy - Wait for busy flag to clear
+              	;------------------------------------------------------------------------------
+0523: DBF8    	waitBsy	in	drvStat
+0525: E601    		ani	busyMsk
+0527: C22305  		jnz	waitBsy
+              	
+052A: C9      		ret
+              	
+              	;------------------------------------------------------------------------------
+              	; readCmd - Read a command line from the console into cmdBuf. Handles
+              	;   backspace, terminates on C/R. Converts lower case to upper case.
+              	;   Clobbers a, b, c, h, l.
+              	;------------------------------------------------------------------------------
+052B: 0600    	readCmd	mvi	b,0		;b = stored character count
+052D: 21F80C  		lxi	h,cmdBuf	;hl = pointer to cmdBuf
+0530: CD9405  	nxtChar	call	rcvChar		;get character from serial port
+              	
+              	; Look for special characters (CR, BS, control characters)
+              	
+0533: FE0D    		cpi	cr		;C/R?
+0535: CA8C05  		jz	cmdDone
+0538: FE08    		cpi	bs		;back space?
+053A: CA7305  		jz	backSpc
+053D: FE20    		cpi	020h		;ignore control characters 
+053F: DA3005  		jc	nxtChar
+0542: FE61    		cpi	'a'		;convert lower to upper case (garbage past 'z')
+0544: DA4905  		jc	upper
+0547: D620    		sui	020h
+0549: 4F      	upper	mov	c,a		;save the character in c
+054A: 78      		mov	a,b		;any more room left?
+054B: FE0F    		cpi	cmdLen-1	
+054D: CA3005  		jz	nxtChar		;out of room for more characters
+0550: 71      		mov	m,c		;put the new character in the buffer
+0551: 23      		inx	h		;increment buffer pointer
+0552: 04      		inr	b		;increment stored character counter
+0553: CDD506  		call	sndChar		;echo character in c to the serial port
+              	
+              	; check for an immediate T, Z, I, or O command
+              	
+0556: 79      		mov	a,c		;a=current character
+0557: FE54    		cpi	'T'
+0559: CA6B05  		jz	test1st		;see if first character on the line
+055C: FE5A    		cpi	'Z'
+055E: CA6B05  		jz	test1st		;see if first character on the line
+0561: FE49    		cpi	'I'
+0563: CA6B05  		jz	test1st		;see if first character on the line
+0566: FE4F    		cpi	'O'
+0568: C23005  		jnz	nxtChar		;not 1st on the line, continue
+              	
+056B: 78      	test1st	mov	a,b		;see if character count = 1 
+056C: 3D      		dcr	a
+056D: CA8C05  		jz	cmdDone		;im,ediate command at 1st position
+0570: C33005  		jmp	nxtChar		;otherwise, keep looping
+              	
+              	;  backSpc - backspace pressed. Backup up in the buffer and echo a backspace,
+              	;     space, backspace to visually delete the character.
+              	
+0573: 78      	backSpc	mov	a,b		;see if already at zero characters
+0574: B7      		ora	a
+0575: CA3005  		jz	nxtChar		;nothing to delete
+0578: 05      		dcr	b		;decrement the character count
+0579: 2B      		dcx	h		;and the the buffer pointer
+057A: 0E08    		mvi	c,bs		;echo BS, space, BS to do a delete
+057C: CDD506  		call	sndChar	
+057F: 0E20    		mvi	c,' '
+0581: CDD506  		call	sndChar
+0584: 0E08    		mvi	c,bs
+0586: CDD506  		call	sndChar
+0589: C33005  		jmp	nxtChar
+              	
+              	;  cmdDone - Carriage return received. Zero terminate the string. Echo
+              	;     the carriage return and add a line feed.
+              	
+058C: 3600    	cmdDone	mvi	m,0		;store null terminator
+058E: 21ED0C  		lxi	h,mCrLf		;echo carriage return, line-feed
+0591: C3C406  		jmp	dispMsg
+              	
+              	;------------------------------------------------------------------------------
+              	; rcvChar - Return a character from the serial port in A. MSB is cleared.
+              	; Z is cleared cleared unless received chr is a null.
+              	;------------------------------------------------------------------------------
+0594: 3AA70D  	rcvChar	lda	headLd		;see if we need to load the head
+0597: B7      		ora	a
+0598: CAAC05  		jz	rStat
+              	
+059B: 3AA80D  		lda	headCnt		;get counter
+059E: 3D      		dcr	a		;decrement
+059F: 32A80D  		sta	headCnt		;save counter
+05A2: C2AC05  		jnz	rstat		;if not zero skip seek
+              	
+05A5: DBF8    		in	drvStat		;check for busy
+05A7: E601    		ani	busyMsk
+05A9: CC3C03  		cz	seekCur		;not busy - seek to load head
+              	
+05AC: CDB305  	rStat	call	rcvStat		;wait for a character
+05AF: CA9405  		jz	rcvChar
+05B2: C9      		ret
+              	
+              	;------------------------------------------------------------------------------
+              	; rcvStat - Test for Serial Port A chr and get it if available. Return
+              	;    with a=0 and Z set if no character available or if null received.
+              	;------------------------------------------------------------------------------
+05B3: DB10    	rcvStat	in	sioACtl		;wait for a character
+05B5: E601    		ani	sioRdrf		;set z, clear a if no chr		
+05B7: C8      		rz
+05B8: DB11    		in	sioADat		;a = received character
+05BA: E67F    		ani	07fh		;strip parity, clear Z unless null
+05BC: C9      		ret
+              	
+              	;------------------------------------------------------------------------------
+              	; getTokn - moves the next token as pointed to by HL to the token buffer.
+              	;    Leading spaces or commas are skipped. Trailing space, comma or 
+              	;    terminating null in the input buffer terminates the token. The token
+              	;    is null terminated. Clobbers a, d, e. hl updated to allow subsequent
+              	;    calls for the next token
+              	;------------------------------------------------------------------------------
+05BD: 11080D  	getTokn	lxi	d,token		;de points to token string
+05C0: 7E      	skpLead	mov	a,m		;move from cmdBuf to token
+05C1: 12      		stax	d				
+05C2: B7      		ora	a		;end of string?
+05C3: C8      		rz			;yes, all done
+05C4: 23      		inx	h		;move to next input character
+05C5: FE20    		cpi	' '		;skip leading spaces
+05C7: CAC005  		jz	skpLead
+05CA: FE2C    		cpi	','		;treat commas as spaces
+05CC: CAC005  		jz	skpLead
+05CF: 13      		inx	d		;move to next token spot
+              	
+              	;  Leading spaces skipped. Move characters until trailing space, comma
+              	;      or null is reached.
+              	
+05D0: 7E      	tokLoop	mov	a,m		;get next character from cmdBuf
+05D1: 12      		stax	d				
+05D2: B7      		ora	a		;end of string?
+05D3: C8      		rz			;yes, all done
+05D4: 23      		inx	h		;move to next input character
+05D5: FE20    		cpi	' '		;trailing space terminates token
+05D7: CAE305  		jz	tokDone
+05DA: FE2C    		cpi	','
+05DC: CAE305  		jz	tokDone
+05DF: 13      		inx	d		;move to next token spot
+05E0: C3D005  		jmp	tokLoop
+              	
+              	; Insert null terminator at end of token
+              	
+05E3: AF      	tokDone	xra	a		;store terminating null
+05E4: 12      		stax	d
+05E5: C9      		ret
+              	
+              	;------------------------------------------------------------------------------
+              	; dec2bin - Convert ascii-decimal token to binary value in a and b. Return zero
+              	;   status if valid value found. Return non-zero status for error.
+              	;   Clobbers c-e.
+              	;------------------------------------------------------------------------------
+05E6: 0600    	dec2bin	mvi	b,0		;b accumulates result
+05E8: 11080D  		lxi	d,token		;de is token string pointer
+05EB: 1A      		ldax	d		;test for null string
+05EC: B7      		ora	a
+05ED: CA0B06  		jz	decBad
+              		
+05F0: 1A      	decLoop	ldax	d		;next ascii digit
+05F1: B7      		ora	a		;end of string?
+05F2: CA0906  		jz	decDone		;yes, we're done
+05F5: D630    		sui	'0'		;subtract ASCII offset
+05F7: D8      		rc			;before '0' - invalid digit (Z flag is cleared)
+05F8: FE0A    		cpi	10		;past 9?
+05FA: D20B06  		jnc	decBad	
+05FD: 4F      		mov	c,a		;save digit in c for  now
+05FE: 78      		mov	a,b		;multiply value so far by 10
+05FF: 87      		add	a		;*2
+0600: 87      		add	a		;*4
+0601: 80      		add	b		;*5
+0602: 87      		add	a		;*10
+0603: 81      		add	c		;add in new digit to ones position
+0604: 47      		mov	b,a		;leave result in b
+0605: 13      		inx	d		;move to next digit
+0606: C3F005  		jmp	decLoop
+              	
+0609: 78      	decDone	mov	a,b		;put result in a too
+060A: C9      		ret			;zero flag was true upon entry to decDone
+              	
+060B: 3C      	decBad	inr	a		;force zero flag false (a<>0FFh here.)
+060C: C9      		ret
+              	
+              	;------------------------------------------------------------------------------
+              	; hex2bin - Convert ascii-hexadecimal token to binary value in a and b.
+              	;   Return zero status if valid value found. Return non-zero status for error.
+              	;   Clobbers c-e.
+              	;------------------------------------------------------------------------------
+060D: 0600    	hex2bin	mvi	b,0		;b accumulates result
+060F: 11080D  		lxi	d,token		;de is token string pointer
+0612: 1A      		ldax	d		;test for null string
+0613: B7      		ora	a
+0614: CA0B06  		jz	decBad
+              		
+0617: 1A      	hexLoop	ldax	d		;next ascii digit
+0618: B7      		ora	a		;end of string?
+0619: CA0906  		jz	decDone		;yes, we're done
+061C: FE3A    		cpi	'9'+1		;below ASCII 9?
+061E: DA2606  		jc	HC1		;Yes: deal with digit
+0621: FE41    		cpi	'A'		;between 9 & A?
+0623: D8      		rc			;y:error (Z flag is cleared.)
+0624: D607    		sui	'A'-'9'-1	;no: subtract offset	
+0626: D630    	HC1:	sui	'0'
+0628: FE10    		cpi	10H		;above 0Fh?
+062A: D20B06  		jnc	decBad		;y: error
+062D: 4F      		mov	c,a		;save digit in c for  now
+062E: 78      		mov	a,b		;multiply value so far by 16
+062F: 87      		add	a
+0630: 87      		add	a
+0631: 87      		add	a
+0632: 87      		add	a
+0633: 81      		add	c		;add in new digit to ones position
+0634: 47      		mov	b,a		;leave result in b
+0635: 13      		inx	d		;move to next digit
+0636: C31706  		jmp	hexLoop
+              	
+              	
+              	;------------------------------------------------------------------------------
+              	; dispSpin - display spinner
+              	;------------------------------------------------------------------------------
+0639: 21F30C  	dispSpn	lxi	h,mSpin
+063C: 3AA60D  		lda	spinCnt
+063F: 47      		mov	b,a		;save count in b
+0640: 85      		add	l
+0641: 6F      		mov	l,a
+0642: 7E      		mov	a,m
+0643: B7      		ora	a
+0644: C24E06  		jnz	sendSpn
+              	
+0647: AF      		xra	a		;reset spin counter
+0648: 32A60D  		sta	spinCnt
+064B: C33906  		jmp	dispSpn
+              	
+064E: 4F      	sendSpn	mov	c,a
+064F: CDD506  		call	sndChar
+0652: 0E08    		mvi	c,bs
+0654: CDD506  		call	sndChar
+0657: 78      		mov	a,b
+0658: 3C      		inr	a
+0659: 32A60D  		sta	spinCnt
+              	
+065C: C9      		ret
+              		
+              	;------------------------------------------------------------------------------
+              	; dispDec - display value in A as a two digit ascii-decimal value. Won't
+              	;   work for values over 99. Clobbers a,b,c.
+              	;------------------------------------------------------------------------------
+065D: 0E2F    	dispDec	mvi	c,'0'-1		;c accumulates the 10's digit in ascii
+              	
+065F: 0C      	tenCnt	inr	c		;count the number of 10's in ascii
+0660: D60A    		sui	10		;divide A by 10 to get the 10's digit
+0662: F25F06  		jp	tenCnt
+              	
+0665: C63A    		adi	'0'+10		;compute final 1's digit in ascii
+0667: 47      		mov	b,a		;save 1's digit in b
+0668: 79      		mov	a,c		;zero suppress 10's digit
+0669: FE30    		cpi	'0'
+066B: C4D506  		cnz	sndChar		;transmit the 10's digit
+066E: 48      		mov	c,b		;transmits the 1's digit
+066F: CDD506  		call	sndChar
+0672: C9      		ret
+              	
+              	;------------------------------------------------------------------------------
+              	; dispSec - display sector buffer
+              	;------------------------------------------------------------------------------
+0673: 211F0D  	dispSec lxi	h,sectBuf
+0676: AF      		xra	a
+0677: 32A50D  	dispNxt	sta	bufCnt
+067A: E5      		push	h
+067B: 7E      		mov	a,m
+067C: CDA006  		call	dispHex
+067F: 0E20    		mvi	c,' '
+0681: CDD506  		call	sndChar
+0684: 3AA50D  		lda	bufCnt
+0687: E607    		ani	007h		;if 7th byte, send CR
+0689: FE07    		cpi	007h
+068B: C29406  		jnz	skipCr
+              	
+068E: 21ED0C  		lxi	h,mCrLf		;start new line
+0691: CDC406  		call	dispMsg
+              	
+0694: E1      	skipCr	pop	h
+0695: 3AA50D  		lda	bufCnt
+0698: 3C      		inr	a
+0699: FE80    		cpi	sectLen		;last character, return
+069B: C8      		rz
+              	
+069C: 23      		inx	h
+069D: C37706  		jmp	dispNxt
+              	
+              	;------------------------------------------------------------------------------
+              	; dispHex - display value in A as a two digit ascii-hexidecimal value.
+              	;   Clobbers a,b.
+              	;------------------------------------------------------------------------------
+06A0: 47      	dispHex	mov	b,a		;store value in b
+              	
+06A1: E6F0    		ani	0f0h		;high nibble
+06A3: 0F      		rrc
+06A4: 0F      		rrc
+06A5: 0F      		rrc
+06A6: 0F      		rrc
+06A7: CDB106  		call	dispNib		;transmit the 16's digit
+06AA: 78      		mov	a,b
+06AB: E60F    		ani	00fh
+06AD: C3B106  		jmp	dispNib		;transmits the 1's digit
+06B0: C9      		ret
+              	
+              	;------------------------------------------------------------------------------
+              	; sndHex - display value in A as a single digit ascii-hexidecimal value.
+              	;   Clobbers a,c.
+              	;------------------------------------------------------------------------------
+06B1: FE0A    	dispNib	cpi	10		;greater than 9?
+06B3: DAB806  		jc	sndNib		;0-9
+06B6: C607    		adi	007h
+              	
+06B8: C630    	sndNib  adi	'0'
+06BA: 4F      		mov	c,a
+06BB: C3D506  		jmp	sndChar
+              	
+              	;------------------------------------------------------------------------------
+              	; dispAny - Display null terminated string, followed by '. any key to abort.
+              	; Clobbers a,c,h,l.  Clears a, sets Z.
+              	;------------------------------------------------------------------------------
+06BE: CDC406  	dispAny	call	dispMsg		;print pessage
+06C1: 214E0C  		lxi	h,mAnyKey	;followed by ". any key to abort"
+              	
+              	; fall into dispMsg
+              	
+              	;------------------------------------------------------------------------------
+              	; dispMsg - Display null terminated string.
+              	;   Clobbers a,c,h,l. Clears a, sets Z.
+              	;------------------------------------------------------------------------------
+06C4: 7E      	dispMsg	mov	a,m		;next character to send
+06C5: B7      		ora	a		;exit on null
+06C6: C8      		rz
+06C7: 4F      		mov	c,a		;send the character
+06C8: CDD506  		call	sndChar
+06CB: 23      		inx	h
+06CC: C3C406  		jmp	dispMsg
+              	
+              	;------------------------------------------------------------------------------
+              	; dispEOL - Display CF/LF
+              	; Clobbers h,l.
+              	;------------------------------------------------------------------------------
+06CF: 21ED0C  	dispEOL	lxi	h,mCrLf
+06D2: C3C406  		jmp	dispMsg		;returns with Z set
+              	
+              	;------------------------------------------------------------------------------
+              	; sndChar - Send the character in C out the serial port. Clobbers a.
+              	;------------------------------------------------------------------------------
+06D5: DB10    	sndChar	in	sioACtl		;wait until OK to xmit
+06D7: E602    		ani	sioTdre
+06D9: CAD506  		jz	sndChar
+06DC: 79      		mov	a,c		
+06DD: D311    		out	sioADat		;send the character
+06DF: C9      		ret
+              	
+              	;------------------------------------------------------------------------------
+              	; chkCpm - check if running under CP/M. CP/M flag is set true (non-zero)
+              	;     if yes, cleared otherwise.
+              	;------------------------------------------------------------------------------
+              	; First, initialize entries for stand-alone
+              	
+06E0: AF      	chkCpm	xra	a
+06E1: 32A90D  		sta	cpmFlag		;clear CP/M flag
+06E4: 321A09  		sta	mExit		;prevent CP/M exit message from showing
+              	
+              	; Determine if we're under CP/M or standalone. CP/M is assumed if
+              	;   a jump instruction is present at the CP/M warm start location (0)
+              	;   and five more jumps (e.g., a jump table) is present at the
+              	;   jump-to destination.
+              			
+06E7: 3A0000  		lda	wBoot		;see if jump instruction present for CP/M
+06EA: FEC3    		cpi	jmpInst
+06EC: C0      		rnz			;no, not CP/M
+              	
+              	; A jump instruction is present at the CP/M warm boot location (0),
+              	;   now see if that jump points to five more jumps. If so, assume CP/M
+              	
+06ED: 210100  		lxi	h,wBoot+1	;point to lsb of jump address
+06F0: 5E      		mov	e,m		;e=low byte of jump
+06F1: 23      		inx	h
+06F2: 56      		mov	d,m		;de=destination of jump
+06F3: 0605    		mvi	b,5		;look for 5 more jumps (a jump table)
+06F5: 1A      	jmpTest	ldax	d		;a=opcode at jump destination
+06F6: D6C3    		sui	jmpInst		;another jump present?
+06F8: C0      		rnz			;no, not CP/M
+06F9: 13      		inx	d		;move to next jump
+06FA: 13      		inx	d
+06FB: 13      		inx	d
+06FC: 05      		dcr	b
+06FD: C2F506  		jnz	jmpTest
+              	
+              	; Running under CP/M. Set CP/M flag, allow CP/M exit message to display
+              	
+0700: 3E20    		mvi	a,' '		;replace null with a leading space to
+0702: 321A09  		sta	mExit		;   allow CP/M exit message to display
+0705: 32A90D  		sta	cpmFlag		;set CP/M flag to non-zero value
+              	
+              	;	lxi	h,mCpmFnd	;running under CP/M
+              	;	jmp	dispMsg		;display and return
+0708: C9      		ret
+              	
+              	;------------------------------------------------------------------------------
+              	; exitCpm - if running under CP/M, prompt user to insert the CP/M
+              	;    disk and then warm-start CP/M. Otherwise, just return.
+              	;------------------------------------------------------------------------------
+0709: 3AA90D  	exitCpm	lda	cpmFlag		;running under CP/M?
+070C: B7      		ora	a		;test for zero
+070D: C8      		rz			;no, not CP/M
+              	
+              	; Prompt user to re-insert CP/M disk, wait for response, then
+              	;    warm boot CP/M
+              	
+070E: 3EC0    		mvi	a,dSelect	;select drive 0
+0710: D3FC    		out	drvSel
+0712: 21A80C  		lxi	h,mCpm		;display "Insert CP/M disk"	
+0715: CDC406  		call	dispMsg
+0718: CD9405  		call	rcvChar		;wait for a character
+071B: C30000  		jmp	wBoot		;warm boot CP/M
+              	
+              	;------------------------------------------------------------------------------
+              	; initSio - reset and initialize 2SIO port A if not running under CP/M
+              	;------------------------------------------------------------------------------
+071E: 3AA90D  	initSio	lda	cpmFlag		;running under CP/M?
+0721: B7      		ora	a
+0722: C0      		rnz			;yes, 2SIO already initialized
+0723: 3E03    		mvi	a,3		;reset ACIA
+0725: D310    		out	sioACtl
+0727: 3E15    		mvi	a,015h		;RTS on, 8N1
+0729: D310    		out	sioACtl
+072B: C9      		ret
+              	
+              	;------------------------------------------------------------------------------
+              	; message strings
+              	;------------------------------------------------------------------------------
+072C: 54617262	mVer	db	'Tarbell Floppy Drive Exerciser, Ver 1.0',cr,lf,0
+0730: 656C6C20	
+0734: 466C6F70	
+0738: 70792044	
+073C: 72697665	
+0740: 20457865	
+0744: 72636973	
+0748: 65722C20	
+074C: 56657220	
+0750: 312E300D	
+0754: 0A00    	
+0756: 44656C74	mAuthor	db	'Deltec Enterprises LLC 2019',cr,lf,0
+075A: 65632045	
+075E: 6E746572	
+0762: 70726973	
+0766: 6573204C	
+076A: 4C432032	
+076E: 3031390D	
+0772: 0A00    	
+0774: 0D0A434D	mPrompt	db	cr,lf,'CMD>',0
+0778: 443E00  	
+              	
+077B: 0D0A5661	mHelp	db	cr,lf,'Valid commands are:',cr,lf
+077F: 6C696420	
+0783: 636F6D6D	
+0787: 616E6473	
+078B: 20617265	
+078F: 3A0D0A  	
+0792: 20204420		db	'  D [x]        Select drive x or display current',cr,lf
+0796: 5B785D20	
+079A: 20202020	
+079E: 20202053	
+07A2: 656C6563	
+07A6: 74206472	
+07AA: 69766520	
+07AE: 78206F72	
+07B2: 20646973	
+07B6: 706C6179	
+07BA: 20637572	
+07BE: 72656E74	
+07C2: 0D0A    	
+07C4: 20202020		db	'               drive if x omitted',cr,lf
+07C8: 20202020	
+07CC: 20202020	
+07D0: 20202064	
+07D4: 72697665	
+07D8: 20696620	
+07DC: 78206F6D	
+07E0: 69747465	
+07E4: 640D0A  	
+07E7: 20204320		db	'  C            Compare the track number read from',cr,lf
+07EB: 20202020	
+07EF: 20202020	
+07F3: 20202043	
+07F7: 6F6D7061	
+07FB: 72652074	
+07FF: 68652074	
+0803: 7261636B	
+0807: 206E756D	
+080B: 62657220	
+080F: 72656164	
+0813: 2066726F	
+0817: 6D0D0A  	
+081A: 20202020		db	'               disk with the expected track number',cr,lf
+081E: 20202020	
+0822: 20202020	
+0826: 20202064	
+082A: 69736B20	
+082E: 77697468	
+0832: 20746865	
+0836: 20657870	
+083A: 65637465	
+083E: 64207472	
+0842: 61636B20	
+0846: 6E756D62	
+084A: 65720D0A	
+084E: 20204620		db	'  F x          Format track x',cr,lf
+0852: 78202020	
+0856: 20202020	
+085A: 20202046	
+085E: 6F726D61	
+0862: 74207472	
+0866: 61636B20	
+086A: 780D0A  	
+086D: 20204720		db	'  G            Display FD1771 registers',cr,lf
+0871: 20202020	
+0875: 20202020	
+0879: 20202044	
+087D: 6973706C	
+0881: 61792046	
+0885: 44313737	
+0889: 31207265	
+088D: 67697374	
+0891: 6572730D	
+0895: 0A      	
+0896: 20205220		db	'  R x          Read sector x',cr,lf
+089A: 78202020	
+089E: 20202020	
+08A2: 20202052	
+08A6: 65616420	
+08AA: 73656374	
+08AE: 6F722078	
+08B2: 0D0A    	
+08B4: 20205320		db	'  S x [y]      Step to track x and optionally toggle to y',cr,lf
+08B8: 78205B79	
+08BC: 5D202020	
+08C0: 20202053	
+08C4: 74657020	
+08C8: 746F2074	
+08CC: 7261636B	
+08D0: 20782061	
+08D4: 6E64206F	
+08D8: 7074696F	
+08DC: 6E616C6C	
+08E0: 7920746F	
+08E4: 67676C65	
+08E8: 20746F20	
+08EC: 790D0A  	
+08EF: 20205720		db	'  W x hh       Write sector x with hex hh',cr,lf
+08F3: 78206868	
+08F7: 20202020	
+08FB: 20202057	
+08FF: 72697465	
+0903: 20736563	
+0907: 746F7220	
+090B: 78207769	
+090F: 74682068	
+0913: 65782068	
+0917: 680D0A  	
+091A: 20205820	mExit	db	'  X            Exit to CP/M',cr,lf,0
+091E: 20202020	
+0922: 20202020	
+0926: 20202045	
+092A: 78697420	
+092E: 746F2043	
+0932: 502F4D0D	
+0936: 0A00    	
+              	
+0938: 0A496D6D	mHelp2	db	lf,'Immediate commands:',cr,lf
+093C: 65646961	
+0940: 74652063	
+0944: 6F6D6D61	
+0948: 6E64733A	
+094C: 0D0A    	
+094E: 20205420		db	'  T            Toggle head load',cr,lf
+0952: 20202020	
+0956: 20202020	
+095A: 20202054	
+095E: 6F67676C	
+0962: 65206865	
+0966: 6164206C	
+096A: 6F61640D	
+096E: 0A      	
+096F: 20204F20		db	'  O            Step out one track',cr,lf
+0973: 20202020	
+0977: 20202020	
+097B: 20202053	
+097F: 74657020	
+0983: 6F757420	
+0987: 6F6E6520	
+098B: 74726163	
+098F: 6B0D0A  	
+0992: 20204920		db	'  I            Step in one track',cr,lf
+0996: 20202020	
+099A: 20202020	
+099E: 20202053	
+09A2: 74657020	
+09A6: 696E206F	
+09AA: 6E652074	
+09AE: 7261636B	
+09B2: 0D0A    	
+09B4: 20205A20		db	'  Z            Restore to track zero',cr,lf,0
+09B8: 20202020	
+09BC: 20202020	
+09C0: 20202052	
+09C4: 6573746F	
+09C8: 72652074	
+09CC: 6F207472	
+09D0: 61636B20	
+09D4: 7A65726F	
+09D8: 0D0A00  	
+              	
+09DB: 4E6F2061	mNoAct	db	'No action taken',0
+09DF: 6374696F	
+09E3: 6E207461	
+09E7: 6B656E00	
+09EB: 48656164	mHeadL	db	'Head loaded',0
+09EF: 206C6F61	
+09F3: 64656400	
+09F7: 48656164	mHeadU	db	'Head unloaded',0
+09FB: 20756E6C	
+09FF: 6F616465	
+0A03: 6400    	
+0A05: 4D6F7665	mTrack0	db	'Moved to track zero',0
+0A09: 6420746F	
+0A0D: 20747261	
+0A11: 636B207A	
+0A15: 65726F00	
+0A19: 4D6F7665	mTrackN	db	'Moved to track ',0
+0A1D: 6420746F	
+0A21: 20747261	
+0A25: 636B2000	
+0A29: 466F726D	mFmtDon	db	'Format complete',0
+0A2D: 61742063	
+0A31: 6F6D706C	
+0A35: 65746500	
+0A39: 466F726D	mFmtErr	db	'Format error ',0
+0A3D: 61742065	
+0A41: 72726F72	
+0A45: 2000    	
+0A47: 416C7265	mAtTrkN	db	'Already at track ',0
+0A4B: 61647920	
+0A4F: 61742074	
+0A53: 7261636B	
+0A57: 2000    	
+0A59: 54726163	mTrkId	db	'Track ID from disk: ',0
+0A5D: 6B204944	
+0A61: 2066726F	
+0A65: 6D206469	
+0A69: 736B3A20	
+0A6D: 00      	
+0A6E: 54726163	mNoTkId	db	'Track ID could not be read',0
+0A72: 6B204944	
+0A76: 20636F75	
+0A7A: 6C64206E	
+0A7E: 6F742062	
+0A82: 65207265	
+0A86: 616400  	
+0A89: 0D0A4578	mExpTrk	db	cr,lf,'Expected track: ',0
+0A8D: 70656374	
+0A91: 65642074	
+0A95: 7261636B	
+0A99: 3A2000  	
+0A9C: 0D0A2020	mTrkSet	db	cr,lf,'  ** Current track set to ',0
+0AA0: 2A2A2043	
+0AA4: 75727265	
+0AA8: 6E742074	
+0AAC: 7261636B	
+0AB0: 20736574	
+0AB4: 20746F20	
+0AB8: 00      	
+0AB9: 53656C65	mDrive	db	'Selected drive ',0
+0ABD: 63746564	
+0AC1: 20647269	
+0AC5: 76652000	
+0AC9: 43757272	mCurDrv	db	'Current drive is ',0
+0ACD: 656E7420	
+0AD1: 64726976	
+0AD5: 65206973	
+0AD9: 2000    	
+0ADB: 0D0A4472	mNotRdy	db	cr,lf,'Drive not present or loaded',cr,lf,0
+0ADF: 69766520	
+0AE3: 6E6F7420	
+0AE7: 70726573	
+0AEB: 656E7420	
+0AEF: 6F72206C	
+0AF3: 6F616465	
+0AF7: 640D0A00	
+0AFB: 0D0A4375	mDrvTrk	db	cr,lf,'Current track is ',0
+0AFF: 7272656E	
+0B03: 74207472	
+0B07: 61636B20	
+0B0B: 69732000	
+0B0F: 20547261	mTrkReg	db	' Track Register: ',0
+0B13: 636B2052	
+0B17: 65676973	
+0B1B: 7465723A	
+0B1F: 2000    	
+0B21: 53656374	mSecReg	db	'Sector Register: ',0
+0B25: 6F722052	
+0B29: 65676973	
+0B2D: 7465723A	
+0B31: 2000    	
+0B33: 53746174	mStaReg	db	'Status Register: ',0
+0B37: 75732052	
+0B3B: 65676973	
+0B3F: 7465723A	
+0B43: 2000    	
+0B45:         	mNotSet	equ	$
+0B45: 6E6F7420	mNoTrk	db	'not set',0
+0B49: 73657400	
+0B4D: 0D0A2020	mSpace	db	cr,lf,'   Press Spacebar to toggle tracks: ',0
+0B51: 20507265	
+0B55: 73732053	
+0B59: 70616365	
+0B5D: 62617220	
+0B61: 746F2074	
+0B65: 6F67676C	
+0B69: 65207472	
+0B6D: 61636B73	
+0B71: 3A2000  	
+0B74: 53746570	mStpIn	db	'Stepped in one track',0
+0B78: 70656420	
+0B7C: 696E206F	
+0B80: 6E652074	
+0B84: 7261636B	
+0B88: 00      	
+0B89: 53746570	mStpOut	db	'Stepped out one track',0
+0B8D: 70656420	
+0B91: 6F757420	
+0B95: 6F6E6520	
+0B99: 74726163	
+0B9D: 6B00    	
+0B9F: 496E7661	mBadDrv	db	'Invalid drive number',0
+0BA3: 6C696420	
+0BA7: 64726976	
+0BAB: 65206E75	
+0BAF: 6D626572	
+0BB3: 00      	
+0BB4: 496E7661	mBadTrk	db	'Invalid track number',0
+0BB8: 6C696420	
+0BBC: 74726163	
+0BC0: 6B206E75	
+0BC4: 6D626572	
+0BC8: 00      	
+0BC9: 496E7661	mBadSec	db	'Invalid sector number',0
+0BCD: 6C696420	
+0BD1: 73656374	
+0BD5: 6F72206E	
+0BD9: 756D6265	
+0BDD: 7200    	
+0BDF: 57616974	mWtDrv	db	'Waiting for drive to be ready',0
+0BE3: 696E6720	
+0BE7: 666F7220	
+0BEB: 64726976	
+0BEF: 6520746F	
+0BF3: 20626520	
+0BF7: 72656164	
+0BFB: 7900    	
+0BFD: 496E7661	mBadVal	db	'Invalid write value',0
+0C01: 6C696420	
+0C05: 77726974	
+0C09: 65207661	
+0C0D: 6C756500	
+0C11: 0D0A5772	mWrtDat	db	cr,lf,'Writing to disk',0
+0C15: 6974696E	
+0C19: 6720746F	
+0C1D: 20646973	
+0C21: 6B00    	
+0C23: 54726163	mNoTk0	db	'Track 0 not found',0
+0C27: 6B203020	
+0C2B: 6E6F7420	
+0C2F: 666F756E	
+0C33: 6400    	
+0C35: 0D0A4D65	mMSpind	db	cr,lf,'Measuring Spindle Revs',0
+0C39: 61737572	
+0C3D: 696E6720	
+0C41: 5370696E	
+0C45: 646C6520	
+0C49: 52657673	
+0C4D: 00      	
+0C4E: 2E205072	mAnyKey	db	'. Press any key to abort.',0
+0C52: 65737320	
+0C56: 616E7920	
+0C5A: 6B657920	
+0C5E: 746F2061	
+0C62: 626F7274	
+0C66: 2E00    	
+0C68: 206D532F	mMsRev	db	' mS/rev',0
+0C6C: 72657600	
+0C70: 52656164	mRdErr	db	'Read error: ',0
+0C74: 20657272	
+0C78: 6F723A20	
+0C7C: 00      	
+0C7D: 57726974	mWrErr	db	'Write error: ',0
+0C81: 65206572	
+0C85: 726F723A	
+0C89: 2000    	
+0C8B: 53746570	mStErr	db	'Step error: ',0
+0C8F: 20657272	
+0C93: 6F723A20	
+0C97: 00      	
+0C98: 0D0A466F	mCpmFnd	db	cr,lf,'Found CP/M.',cr,lf,0
+0C9C: 756E6420	
+0CA0: 43502F4D	
+0CA4: 2E0D0A00	
+0CA8: 0D0A496E	mCpm	db	cr,lf,'Insert CP/M disk into drive A, then press Return...',0
+0CAC: 73657274	
+0CB0: 2043502F	
+0CB4: 4D206469	
+0CB8: 736B2069	
+0CBC: 6E746F20	
+0CC0: 64726976	
+0CC4: 6520412C	
+0CC8: 20746865	
+0CCC: 6E207072	
+0CD0: 65737320	
+0CD4: 52657475	
+0CD8: 726E2E2E	
+0CDC: 2E00    	
+0CDE: 0D0A4469	mTimOut	db	cr,lf,'Disk timeout',0
+0CE2: 736B2074	
+0CE6: 696D656F	
+0CEA: 757400  	
+0CED: 0D0A00  	mCrLf	db	cr,lf,0
+0CF0: 2C2000  	mComma	db	', ',0
+0CF3: 7C2F2D5C	mSpin	db	'|/-\',0
+0CF7: 00      	
+              	
+              	
+              	;------------------------------------------------------------------------------
+              	; cmdBuf - command buffer, variables and stack space.
+              	;------------------------------------------------------------------------------
+0CF8: FFFFFFFF	cmdBuf  ds      16              ;command input buffer
+0CFC: FF...   	
+0D08: FFFFFFFF	token   ds      16              ;token buffer
+0D0C: FF...   	
+0D18: FF      	track1  ds      1               ;1st track # for toggling tracks
+0D19: FF      	track2  ds      1               ;2nd track # for toggling tracks
+0D1A: FF      	wrSec	ds	1		;write sector number
+0D1B: FF      	wrVal	ds	1		;write sector value
+0D1C: FF      	newDrv  ds      1               ;new drive # to select
+0D1D: FF      	curDrv  ds      1               ;currently selected drive #
+0D1E: FF      	curErr  ds      1               ;current error
+0D1F: FFFFFFFF	sectBuf	ds	sectLen		;sector buffer
+0D23: FF...   	
+0D9F: FFFFFFFF	addrBuf	ds	6		;address buffer
+0DA3: FFFF    	
+0DA5: FF      	bufCnt	ds	1		;buffer count
+0DA6: 00      	spinCnt	db	0		;spinner count
+0DA7: 00      	headLd	db	0		;head load flag
+0DA8: 00      	headCnt	db	0		;head load counter
+0DA9: FF      	cpmFlag ds      1               ;non-zero if running under CP/M
+              	
+              	;------------------------------------------------------------------------------
+              	; stack
+              	;------------------------------------------------------------------------------
+0DAA: FFFFFFFF		ds	64
+0DAE: FF...   	
+0DEA:         	stack	equ	$
+              	
+              		end
+              	
+
+
+; +++ segments +++
+
+#CODE          = $0100 =   256,  size = $0CEA =  3306
+
+; +++ global symbols +++
+
+_8080_     = $0001 =     1          :1 (unused)
+_asm8080_  = $0001 =     1          :1 (unused)
+_casefold_ = $0001 =     1          :1 (unused)
+_end       = $0DEA =  3562          tfexer.asm:103 (unused)
+_size      = $0CEA =  3306          tfexer.asm:103 (unused)
+addrbuf    = $0D9F =  3487          tfexer.asm:1399
+atdisp     = $0407 =  1031          tfexer.asm:648
+backspc    = $0573 =  1395          tfexer.asm:939
+baddrv     = $01D4 =   468          tfexer.asm:229
+badsect    = $02FB =   763          tfexer.asm:422
+badtrk     = $0259 =   601          tfexer.asm:318
+bs         = $0008 =     8          tfexer.asm:98
+bufcnt     = $0DA5 =  3493          tfexer.asm:1400
+busymsk    = $0001 =     1          tfexer.asm:43
+chkcpm     = $06E0 =  1760          tfexer.asm:1246
+chkrdy     = $03A7 =   935          tfexer.asm:558
+cmdbuf     = $0CF8 =  3320          tfexer.asm:1389
+cmdcmp     = $035F =   863          tfexer.asm:500
+cmddone    = $058C =  1420          tfexer.asm:955
+cmddrvn    = $019D =   413          tfexer.asm:187
+cmdfmtn    = $0413 =  1043          tfexer.asm:663
+cmdin      = $01FE =   510          tfexer.asm:263
+cmdlen     = $0010 =    16          tfexer.asm:95
+cmdloop    = $011C =   284          tfexer.asm:127
+cmdout     = $01E4 =   484          tfexer.asm:244
+cmdread    = $0271 =   625          tfexer.asm:337
+cmdregs    = $0176 =   374          tfexer.asm:167
+cmdtog     = $0316 =   790          tfexer.asm:442
+cmdtrk0    = $01DA =   474          tfexer.asm:235
+cmdtrkn    = $0218 =   536          tfexer.asm:282
+cmdwrt     = $02AF =   687          tfexer.asm:378
+cpmflag    = $0DA9 =  3497          tfexer.asm:1404
+cr         = $000D =    13          tfexer.asm:96
+crcmsk     = $0008 =     8          tfexer.asm:48 (unused)
+curdrv     = $0D1D =  3357          tfexer.asm:1396
+curerr     = $0D1E =  3358          tfexer.asm:1397 (unused)
+datgap     = $04F5 =  1269          tfexer.asm:847 (unused)
+dcintr     = $00D0 =   208          tfexer.asm:67
+dcrdtr     = $00E4 =   228          tfexer.asm:64
+dcread     = $008C =   140          tfexer.asm:62
+dcreada    = $00C4 =   196          tfexer.asm:66
+dcrest     = $0000 =     0          tfexer.asm:57
+dcseek     = $0010 =    16          tfexer.asm:58
+dcstep     = $0020 =    32          tfexer.asm:59 (unused)
+dcstepi    = $0040 =    64          tfexer.asm:60
+dcstepo    = $0060 =    96          tfexer.asm:61
+dcwrite    = $00AC =   172          tfexer.asm:63
+dcwrttr    = $00F4 =   244          tfexer.asm:65
+dec2bin    = $05E6 =  1510          tfexer.asm:1036
+decbad     = $060B =  1547          tfexer.asm:1063
+decdone    = $0609 =  1545          tfexer.asm:1060
+decloop    = $05F0 =  1520          tfexer.asm:1042
+dfill      = $04D9 =  1241          tfexer.asm:824
+dispany    = $06BE =  1726          tfexer.asm:1206 (unused)
+dispdec    = $065D =  1629          tfexer.asm:1130
+dispeol    = $06CF =  1743          tfexer.asm:1227
+disperr    = $0307 =   775          tfexer.asm:431
+dispexp    = $0377 =   887          tfexer.asm:517
+disphex    = $06A0 =  1696          tfexer.asm:1177
+dispmsg    = $06C4 =  1732          tfexer.asm:1215
+dispnib    = $06B1 =  1713          tfexer.asm:1194
+dispnxt    = $0677 =  1655          tfexer.asm:1150
+dispsec    = $0673 =  1651          tfexer.asm:1148
+dispspn    = $0639 =  1593          tfexer.asm:1103
+done       = $050F =  1295          tfexer.asm:869
+drqmsk     = $0002 =     2          tfexer.asm:45 (unused)
+drvbase    = $00F8 =   248          tfexer.asm:34
+drvcmd     = $00F8 =   248          tfexer.asm:36
+drvdata    = $00FB =   251          tfexer.asm:39
+drvsec     = $00FA =   250          tfexer.asm:38
+drvsel     = $00FC =   252          tfexer.asm:41
+drvstat    = $00F8 =   248          tfexer.asm:35
+drvtrk     = $00F9 =   249          tfexer.asm:37
+drvwait    = $00FC =   252          tfexer.asm:40
+dselect    = $00C0 =   192          tfexer.asm:77
+endtrk     = $0502 =  1282          tfexer.asm:857
+errmsk     = $00FC =   252          tfexer.asm:55
+exitcpm    = $0709 =  1801          tfexer.asm:1290
+f10ms      = $0002 =     2          tfexer.asm:75
+fheadld    = $0008 =     8          tfexer.asm:69
+fimmint    = $0008 =     8          tfexer.asm:74
+flength    = $0008 =     8          tfexer.asm:73 (unused)
+fmtfail    = $051C =  1308          tfexer.asm:876
+fmult      = $0010 =    16          tfexer.asm:72 (unused)
+fupdate    = $0010 =    16          tfexer.asm:71
+fverify    = $0004 =     4          tfexer.asm:70 (unused)
+gettokn    = $05BD =  1469          tfexer.asm:998
+hc1        = $0626 =  1574          tfexer.asm:1085
+headcnt    = $0DA8 =  3496          tfexer.asm:1403
+headld     = $0DA7 =  3495          tfexer.asm:1402
+headmsk    = $0020 =    32          tfexer.asm:51 (unused)
+hex2bin    = $060D =  1549          tfexer.asm:1071
+hexloop    = $0617 =  1559          tfexer.asm:1077
+indxmsk    = $0002 =     2          tfexer.asm:44 (unused)
+initsio    = $071E =  1822          tfexer.asm:1307
+jmpinst    = $00C3 =   195          tfexer.asm:101
+jmptest    = $06F5 =  1781          tfexer.asm:1267
+lf         = $000A =    10          tfexer.asm:97
+lostmsk    = $0004 =     4          tfexer.asm:47 (unused)
+manykey    = $0C4E =  3150          tfexer.asm:1373
+mattrkn    = $0A47 =  2631          tfexer.asm:1348
+mauthor    = $0756 =  1878          tfexer.asm:1320
+maxtrk     = $004D =    77          tfexer.asm:83
+mbaddrv    = $0B9F =  2975          tfexer.asm:1365
+mbadsec    = $0BC9 =  3017          tfexer.asm:1367
+mbadtrk    = $0BB4 =  2996          tfexer.asm:1366
+mbadval    = $0BFD =  3069          tfexer.asm:1369
+mcomma     = $0CF0 =  3312          tfexer.asm:1382 (unused)
+mcpm       = $0CA8 =  3240          tfexer.asm:1379
+mcpmfnd    = $0C98 =  3224          tfexer.asm:1378 (unused)
+mcrlf      = $0CED =  3309          tfexer.asm:1381
+mcurdrv    = $0AC9 =  2761          tfexer.asm:1354
+mdrive     = $0AB9 =  2745          tfexer.asm:1353
+mdrvtrk    = $0AFB =  2811          tfexer.asm:1356
+mexit      = $091A =  2330          tfexer.asm:1333
+mexptrk    = $0A89 =  2697          tfexer.asm:1351
+mfmtdon    = $0A29 =  2601          tfexer.asm:1346
+mfmterr    = $0A39 =  2617          tfexer.asm:1347
+mheadl     = $09EB =  2539          tfexer.asm:1342
+mheadu     = $09F7 =  2551          tfexer.asm:1343
+mhelp      = $077B =  1915          tfexer.asm:1323
+mhelp2     = $0938 =  2360          tfexer.asm:1335
+mmspind    = $0C35 =  3125          tfexer.asm:1372 (unused)
+mmsrev     = $0C68 =  3176          tfexer.asm:1374 (unused)
+mnoact     = $09DB =  2523          tfexer.asm:1341 (unused)
+mnotk0     = $0C23 =  3107          tfexer.asm:1371 (unused)
+mnotkid    = $0A6E =  2670          tfexer.asm:1350 (unused)
+mnotrdy    = $0ADB =  2779          tfexer.asm:1355
+mnotrk     = $0B45 =  2885          tfexer.asm:1361 (unused)
+mnotset    = $0B45 =  2885          tfexer.asm:1360 (unused)
+movexit    = $03FC =  1020          tfexer.asm:641
+movtrk     = $03EF =  1007          tfexer.asm:629
+mprompt    = $0774 =  1908          tfexer.asm:1321
+mrderr     = $0C70 =  3184          tfexer.asm:1375
+msecreg    = $0B21 =  2849          tfexer.asm:1358
+mspace     = $0B4D =  2893          tfexer.asm:1362
+mspin      = $0CF3 =  3315          tfexer.asm:1383
+mstareg    = $0B33 =  2867          tfexer.asm:1359
+msterr     = $0C8B =  3211          tfexer.asm:1377
+mstpin     = $0B74 =  2932          tfexer.asm:1363 (unused)
+mstpout    = $0B89 =  2953          tfexer.asm:1364 (unused)
+mtimout    = $0CDE =  3294          tfexer.asm:1380 (unused)
+mtrack0    = $0A05 =  2565          tfexer.asm:1344
+mtrackn    = $0A19 =  2585          tfexer.asm:1345
+mtrkid     = $0A59 =  2649          tfexer.asm:1349
+mtrkreg    = $0B0F =  2831          tfexer.asm:1357
+mtrkset    = $0A9C =  2716          tfexer.asm:1352 (unused)
+mver       = $072C =  1836          tfexer.asm:1319
+mwrerr     = $0C7D =  3197          tfexer.asm:1376
+mwrtdat    = $0C11 =  3089          tfexer.asm:1370 (unused)
+mwtdrv     = $0BDF =  3039          tfexer.asm:1368 (unused)
+newdrv     = $0D1C =  3356          tfexer.asm:1395
+nodrv      = $01C8 =   456          tfexer.asm:217
+notfmsk    = $0010 =    16          tfexer.asm:50 (unused)
+notrdy     = $03AC =   940          tfexer.asm:565
+notrk2     = $0253 =   595          tfexer.asm:313
+notset     = $00FF =   255          tfexer.asm:99 (unused)
+noval      = $0301 =   769          tfexer.asm:425
+nrdymsk    = $0080 =   128          tfexer.asm:54
+numdrvs    = $0004 =     4          tfexer.asm:84
+numspt     = $001A =    26          tfexer.asm:82
+nxtchar    = $0530 =  1328          tfexer.asm:897
+postgap    = $0455 =  1109          tfexer.asm:710
+postid     = $0457 =  1111          tfexer.asm:712
+preda1     = $04C0 =  1216          tfexer.asm:803
+predat     = $04B0 =  1200          tfexer.asm:792
+prein1     = $043E =  1086          tfexer.asm:690
+preind     = $042E =  1070          tfexer.asm:679
+rcvchar    = $0594 =  1428          tfexer.asm:963
+rcvstat    = $05B3 =  1459          tfexer.asm:984
+rddone     = $02A2 =   674          tfexer.asm:367
+rderr      = $02A8 =   680          tfexer.asm:371
+rdloop     = $0295 =   661          tfexer.asm:358
+rdtdata    = $038F =   911          tfexer.asm:537
+rdtdone    = $039C =   924          tfexer.asm:546
+rdtrkid    = $0382 =   898          tfexer.asm:529
+readcmd    = $052B =  1323          tfexer.asm:895
+readtrk    = $034C =   844          tfexer.asm:481 (unused)
+resdrv     = $03B2 =   946          tfexer.asm:571
+rstat      = $05AC =  1452          tfexer.asm:976
+rtloop     = $0356 =   854          tfexer.asm:487
+savetrk    = $0412 =  1042          tfexer.asm:658 (unused)
+sectbuf    = $0D1F =  3359          tfexer.asm:1398
+sectlen    = $0080 =   128          tfexer.asm:81
+sector     = $0467 =  1127          tfexer.asm:725
+seek0      = $03D5 =   981          tfexer.asm:609
+seekcur    = $033C =   828          tfexer.asm:466
+seekmsk    = $0010 =    16          tfexer.asm:49 (unused)
+seldrv     = $03BD =   957          tfexer.asm:585
+sendspn    = $064E =  1614          tfexer.asm:1116
+sioactl    = $0010 =    16          tfexer.asm:88
+sioadat    = $0011 =    17          tfexer.asm:89
+siordrf    = $0001 =     1          tfexer.asm:91
+siotdre    = $0002 =     2          tfexer.asm:90
+skipcr     = $0694 =  1684          tfexer.asm:1164
+skplead    = $05C0 =  1472          tfexer.asm:999
+sndchar    = $06D5 =  1749          tfexer.asm:1233
+sndnib     = $06B8 =  1720          tfexer.asm:1198
+spincnt    = $0DA6 =  3494          tfexer.asm:1401
+stack      = $0DEA =  3562          tfexer.asm:1410
+sterr      = $03E8 =  1000          tfexer.asm:621 (unused)
+tencnt     = $065F =  1631          tfexer.asm:1132
+test1st    = $056B =  1387          tfexer.asm:931
+tgltrk     = $025F =   607          tfexer.asm:326
+toghld     = $0323 =   803          tfexer.asm:450
+tokdone    = $05E3 =  1507          tfexer.asm:1027
+token      = $0D08 =  3336          tfexer.asm:1390
+tokloop    = $05D0 =  1488          tfexer.asm:1013
+track1     = $0D18 =  3352          tfexer.asm:1391
+track2     = $0D19 =  3353          tfexer.asm:1392
+trk0msk    = $0004 =     4          tfexer.asm:46
+trkloop    = $023C =   572          tfexer.asm:301
+unldhd     = $0336 =   822          tfexer.asm:459
+upper      = $0549 =  1353          tfexer.asm:910
+waitbsy    = $0523 =  1315          tfexer.asm:884
+wboot      = $0000 =     0          tfexer.asm:100
+wrdone     = $02F0 =   752          tfexer.asm:412
+wrloop     = $02E2 =   738          tfexer.asm:404
+wrsec      = $0D1A =  3354          tfexer.asm:1393
+wrtfmsk    = $0020 =    32          tfexer.asm:52 (unused)
+wrtpmsk    = $0040 =    64          tfexer.asm:53 (unused)
+wrval      = $0D1B =  3355          tfexer.asm:1394
+
+
+total time: 0.0316 sec.
+no errors
