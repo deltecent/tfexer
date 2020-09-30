@@ -27,7 +27,7 @@
 ; 
 ; Version    Author        Date        Description
 ; 1.0        P. Linstruth  12/10/19    Initial Version
-;
+;            P. Linstruth  09/30/20    Removed unused dispSpn function
 
 ; Tarbell SSSD Disk Drive Controller Equates
 
@@ -1096,33 +1096,6 @@ HC1:	sui	'0'
 	inx	d		;move to next digit
 	jmp	hexLoop
 
-
-;------------------------------------------------------------------------------
-; dispSpin - display spinner
-;------------------------------------------------------------------------------
-dispSpn	lxi	h,mSpin
-	lda	spinCnt
-	mov	b,a		;save count in b
-	add	l
-	mov	l,a
-	mov	a,m
-	ora	a
-	jnz	sendSpn
-
-	xra	a		;reset spin counter
-	sta	spinCnt
-	jmp	dispSpn
-
-sendSpn	mov	c,a
-	call	sndChar
-	mvi	c,bs
-	call	sndChar
-	mov	a,b
-	inr	a
-	sta	spinCnt
-
-	ret
-	
 ;------------------------------------------------------------------------------
 ; dispDec - display value in A as a two digit ascii-decimal value. Won't
 ;   work for values over 99. Clobbers a,b,c.
@@ -1398,7 +1371,6 @@ curErr  ds      1               ;current error
 sectBuf	ds	sectLen		;sector buffer
 addrBuf	ds	6		;address buffer
 bufCnt	ds	1		;buffer count
-spinCnt	db	0		;spinner count
 headLd	db	0		;head load flag
 headCnt	db	0		;head load counter
 cpmFlag ds      1               ;non-zero if running under CP/M
